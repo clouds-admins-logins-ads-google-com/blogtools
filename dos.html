@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DoS Payload Generator</title>
+  <style>
+    :root{
+      --bg:#09090b;
+      --card:#121214;
+      --muted:#a1a1aa;
+      --accent:#3f3f46;
+      --text:#e4e4e7;
+    }
+    *{box-sizing:border-box;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial}
+    body{margin:0;background:var(--bg);color:var(--text);padding:20px}
+    .wrap{max-width:900px;margin:20px auto;background:var(--card);padding:18px;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,0.6)}
+    h1{margin:0 0 8px;font-size:20px;color:var(--text)}
+    label{display:block;margin-top:12px;font-size:13px;color:var(--muted)}
+    input[type="text"], input[type="number"], textarea, select{width:100%;padding:10px;margin-top:6px;border-radius:8px;border:1px solid #1f1f23;background:#1a1a1d;color:var(--text)}
+    .row{display:flex;gap:12px}
+    .row > *{flex:1}
+    .controls{display:flex;gap:8px;align-items:center;margin-top:12px}
+    button{background:var(--accent);border:none;color:var(--text);padding:10px 12px;border-radius:10px;cursor:pointer;font-weight:600}
+    button:hover{background:#52525b}
+    button[disabled]{opacity:0.5;cursor:not-allowed}
+    .muted{color:var(--muted);font-size:13px}
+    progress{width:100%;height:12px;border-radius:8px;overflow:hidden;background:#1f1f23}
+    .meta{margin-top:8px;font-size:13px;color:var(--muted)}
+    small.note{display:block;margin-top:8px;color:#71717a}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>DoS Payload Generator</h1>
+    <p class="muted">Masukkan teks/unicode (contoh: <code>Ж</code> atau <code>Ш</code>), pilih jumlah pengulangan, lalu klik <strong>Generate & Download</strong>. Hasil tidak dirender di halaman untuk menghindari lag — langsung didownload sebagai file.</p>
+
+    <label for="inputText">Teks input</label>
+    <textarea id="inputText" rows="3" placeholder="Masukkan teks di sini..." >a</textarea>
+
+    <div class="row">
+      <div>
+        <label for="count">Jumlah pengulangan</label>
+        <input id="count" type="number" min="1" value="1000" />
+      </div>
+      <div>
+        <label for="sep">Separator (opsional)</label>
+        <input id="sep" type="text" value="" placeholder="kosong = langsung disambung" />
+      </div>
+    </div>
+
+    <label for="filename">Nama file hasil (.txt)</label>
+    <input id="filename" type="text" value="result.txt" />
+
+    <div class="controls">
+      <button id="generateBtn">Generate & Download</button>
+      <button id="cancelBtn" disabled>Cancel</button>
+      <div style="flex:1"></div>
+      <div class="meta">Estimated size: <span id="estSize">—</span></div>
+    </div>
+
+    <label style="margin-top:12px">Progress</label>
+    <progress id="prog" value="0" max="100"></progress>
+    <div class="meta">Status: <span id="status">idle</span></div>
+    <small class="note">Catatan: Untuk jumlah sangat besar (jutaan) proses bisa memakan waktu dan ukuran file besar. Script akan membuat file secara bertahap di memori sebelum didownload; jika ukuran terlalu besar browser mungkin menolak — coba kurangi jumlah atau pakai server-side generator.</small>
+  </div>
+
+  <script>
+    const inputText = document.getElementById('inputText');
+    const countEl = document.getElementById('count');
+    const sepEl = document.getElementById('sep');
+    const filenameEl = document.getElementById('filename');
+    const generateBtn = document.getElementById('generateBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const prog = document.getElementById('prog');
+    const status = document.getElementById('status');
+    const estSize = document.getElementById('estSize');
+
+    let cancelled = false;
+
+    function humanBytes(bytes){
+      if(bytes < 1024) return bytes + ' B';
+      const units = ['KB','MB','GB','TB'];
+      let i = -1; do { bytes = bytes/1024; i++; } while(bytes >= 1024 && i < units.length-1);
+      return bytes.toFixed(2) + ' ' + units[i];
+    }
+
+    function estimateSizePerItem(text, sep){
+      const s = String(text) + String(sep);
+      return new TextEncoder().encode(s).length;
+    }
+
+    function updateEstimate(){
+      const c = Number(countEl.value) || 0;
+      const per = estimateSizePerItem(inputText.value, sepEl.value);
+      const total = per * c;
+      estSize.textContent = humanBytes(total);
+    }
+
+    inputText.addEventListener('input', updateEstimate);
+    sepEl.addEventListener('input', updateEstimate);
+    countEl.addEventListener('input', updateEstimate);
+    updateEstimate();
+
+    async function generateAndDownload(){
+      cancelled = false;
+      generateBtn.disabled = true;
+      cancelBtn.disabled = false;
+      status.textContent = 'starting...';
+
+      const text = inputText.value || '';
+      const sep = sepEl.value || '';
+      const count = Math.max(0, Math.floor(Number(countEl.value) || 0));
+      const filename = filenameEl.value.trim() || 'result.txt';
+
+      if(count <= 0){ alert('Masukkan jumlah pengulangan minimal 1'); generateBtn.disabled = false; cancelBtn.disabled = true; status.textContent = 'idle'; return; }
+
+      const ITEMS_PER_CHUNK = 5000;
+      const parts = [];
+      let produced = 0;
+
+      const oneItem = text + sep;
+
+      status.textContent = 'generating...';
+      prog.max = count;
+      prog.value = 0;
+
+      try{
+        while(produced < count){
+          if(cancelled) throw new Error('cancelled');
+          const remaining = count - produced;
+          const thisChunkItems = Math.min(ITEMS_PER_CHUNK, remaining);
+
+          const arr = new Array(thisChunkItems);
+          for(let i=0;i<thisChunkItems;i++) arr[i] = oneItem;
+          parts.push(arr.join(''));
+
+          produced += thisChunkItems;
+          prog.value = produced;
+          status.textContent = `generating... ${produced} / ${count}`;
+
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+
+        status.textContent = 'finalizing file...';
+
+        const blob = new Blob(parts, {type: 'text/plain;charset=utf-8'});
+
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        status.textContent = `done — downloaded (${humanBytes(blob.size)})`;
+      }catch(err){
+        if(err.message === 'cancelled'){
+          status.textContent = 'cancelled by user';
+        }else{
+          console.error(err);
+          status.textContent = 'error: ' + String(err.message);
+          alert('Terjadi error: ' + err.message);
+        }
+      }finally{
+        generateBtn.disabled = false;
+        cancelBtn.disabled = true;
+        prog.value = prog.max;
+      }
+    }
+
+    generateBtn.addEventListener('click', ()=>{
+      generateAndDownload();
+    });
+
+    cancelBtn.addEventListener('click', ()=>{
+      cancelled = true;
+      cancelBtn.disabled = true;
+      status.textContent = 'cancelling...';
+    });
+
+    window.addEventListener('keydown', (e)=>{
+      if((e.ctrlKey || e.metaKey) && e.key === 'Enter'){
+        generateBtn.click();
+      }
+    });
+  </script>
+</body>
+</html>
